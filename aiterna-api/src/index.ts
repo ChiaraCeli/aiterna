@@ -281,7 +281,7 @@ export default {
 					{
 						reading: {
 							title: page.title,
-							content: sourceMaterial,
+							content: generatedContent,
 
 							sources: [
 								{
