@@ -50,12 +50,12 @@ const selectCategory = (category: ExploreCategory) => {
   selectedCategory.value = category;
 };
 
-const beginExploration = async () => {
-  if (!canBegin.value || !selectedCategory.value) {
+const beginExploration = () => {
+  if (!canBegin.value || !selectedCategory.value || readingStore.isLoading) {
     return;
   }
 
-  await readingStore.generate(
+  void readingStore.generate(
     {
       category: selectedCategory.value,
       length: selectedLength.value,
@@ -65,11 +65,10 @@ const beginExploration = async () => {
           : undefined,
     },
     preferencesStore.language ?? "en",
+    () => {
+      void router.push({ name: "reading" });
+    },
   );
-
-  if (readingStore.currentReading) {
-    router.push({ name: "reading" });
-  }
 };
 </script>
 

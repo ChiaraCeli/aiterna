@@ -161,7 +161,7 @@ const generateReadingWithAI = async (
 	sourceText: string,
 	language: ExploreRequest['language'],
 	length: ExploreRequest['length'],
-): Promise<string> => {
+): Promise<ReadableStream> => {
 	const languageInstruction = language === 'it' ? 'Scrivi in italiano.' : 'Write in English.';
 
 	const lengthInstruction = {
@@ -214,15 +214,14 @@ ${sourceText}
 		chat_template_kwargs: {
 			enable_thinking: false,
 		},
+		stream: true,
 	});
 
-	const content = response.choices?.[0]?.message?.content;
+	return response;
+};
 
-	if (!content || typeof content !== 'string') {
-		throw new Error('AI returned no readable content.');
-	}
-
-	return content.trim();
+const createSSEEvent = (event: string, data: unknown): string => {
+	return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 };
 
 export default {
@@ -275,32 +274,92 @@ export default {
 
 				const wikiBaseUrl = body.language === 'it' ? 'https://it.wikipedia.org/wiki/' : 'https://en.wikipedia.org/wiki/';
 
-				const generatedContent = await generateReadingWithAI(env, page.title, sourceMaterial, body.language, body.length);
+				const aiStream = await generateReadingWithAI(env, page.title, sourceMaterial, body.language, body.length);
 
-				return Response.json(
-					{
-						reading: {
+				const encoder = new TextEncoder();
+				const decoder = new TextDecoder();
+
+				const stream = new ReadableStream<Uint8Array>({
+					async start(controller) {
+						const send = (event: string, data: unknown) => {
+							controller.enqueue(encoder.encode(createSSEEvent(event, data)));
+						};
+
+						send('metadata', {
 							title: page.title,
-							content: generatedContent,
-
 							sources: [
 								{
 									title: `Wikipedia — ${page.title}`,
 									url: `${wikiBaseUrl}${encodeURIComponent(page.key)}`,
 								},
 							],
-						},
+						});
 
-						debug: {
-							query,
-							category: body.category,
-							sourceLength: extract.length,
-						},
+						const reader = aiStream.getReader();
+						let buffer = '';
+
+						try {
+							while (true) {
+								const { done, value } = await reader.read();
+
+								if (done) break;
+
+								buffer += decoder.decode(value, { stream: true });
+
+								// Normalizziamo le interruzioni di riga SSE.
+								buffer = buffer.replace(/\r\n/g, '\n');
+
+								const events = buffer.split('\n\n');
+								buffer = events.pop() ?? '';
+
+								for (const rawEvent of events) {
+									const dataLines = rawEvent
+										.split('\n')
+										.filter((line) => line.startsWith('data:'))
+										.map((line) => line.slice(5).trimStart());
+
+									if (dataLines.length === 0) continue;
+
+									const data = dataLines.join('\n');
+
+									if (data === '[DONE]') continue;
+
+									try {
+										const parsed = JSON.parse(data);
+
+										const content = parsed.response ?? parsed.choices?.[0]?.delta?.content;
+
+										if (typeof content === 'string' && content) {
+											send('chunk', { content });
+										}
+									} catch {
+										console.warn('Unrecognized AI stream event');
+									}
+								}
+							}
+
+							send('done', {});
+						} catch (error) {
+							console.error('AI streaming error:', error);
+
+							send('error', {
+								message: 'Unable to complete reading.',
+							});
+						} finally {
+							reader.releaseLock();
+							controller.close();
+						}
 					},
-					{
-						headers: corsHeaders,
+				});
+
+				return new Response(stream, {
+					headers: {
+						...corsHeaders,
+						'Content-Type': 'text/event-stream; charset=utf-8',
+						'Cache-Control': 'no-cache',
+						'X-Content-Type-Options': 'nosniff',
 					},
-				);
+				});
 			} catch (error) {
 				console.error(error);
 

@@ -33,8 +33,16 @@ const goBack = () => {
             {{ section.content }}
           </section>
         </div>
-
+        <p
+          v-if="readingStore.isLoading"
+          class="reading-view__generating"
+          role="status"
+        >
+          <span class="reading-view__generating-star">✦</span>
+          {{ $t("explore.loading") }}
+        </p>
         <button
+          v-if="!readingStore.isLoading && !readingStore.error"
           type="button"
           class="reading-view__more"
           :disabled="readingStore.isContinuing"
@@ -184,4 +192,35 @@ const goBack = () => {
   opacity: 0.5;
   cursor: default;
 }
+
+.reading-view__generating {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+
+  margin-top: 1.5rem;
+
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+  letter-spacing: 0.04em;
+}
+
+.reading-view__generating-star {
+  color: var(--color-accent-purple);
+  animation: generating-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes generating-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.9);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+}
+
 </style>

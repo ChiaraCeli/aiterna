@@ -5,6 +5,8 @@ import type { ExploreRequest, GeneratedReading } from "@/types/explore";
 import { generateExploreReading } from "@/services/exploreService";
 import { continueExploreReading } from "@/services/exploreService";
 
+let generationController: AbortController | null = null;
+
 export const useReadingStore = defineStore("reading", {
   state: () => ({
     currentReading: null as GeneratedReading | null,
@@ -14,17 +16,57 @@ export const useReadingStore = defineStore("reading", {
   }),
 
   actions: {
-    async generate(request: ExploreRequest, language: "it" | "en") {
+    async generate(
+      request: ExploreRequest,
+      language: "it" | "en",
+      onReady?: () => void,
+    ) {
+      const controller = new AbortController();
+      generationController = controller;
       this.isLoading = true;
       this.error = null;
       this.currentReading = null;
 
       try {
-        this.currentReading = await generateExploreReading(request, language);
-      } catch {
-        this.error = "Unable to generate reading.";
+        await generateExploreReading(
+          request,
+          language,
+          {
+            onMetadata: (metadata) => {
+              if (controller.signal.aborted) return;
+
+              this.currentReading = {
+                title: metadata.title,
+                sources: metadata.sources,
+                sections: [
+                  {
+                    id: "initial",
+                    content: "",
+                  },
+                ],
+              };
+
+              onReady?.();
+            },
+
+            onChunk: (content) => {
+              if (controller.signal.aborted || !this.currentReading) return;
+
+              this.currentReading.sections[0]!.content += content;
+            },
+          },
+          controller.signal,
+        );
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error("Reading generation error:", error);
+          this.error = "Unable to generate reading.";
+        }
       } finally {
-        this.isLoading = false;
+        if (generationController === controller) {
+          generationController = null;
+          this.isLoading = false;
+        }
       }
     },
 
@@ -45,8 +87,12 @@ export const useReadingStore = defineStore("reading", {
     },
 
     clear() {
+      generationController?.abort();
+      generationController = null;
+
       this.currentReading = null;
       this.error = null;
+      this.isLoading = false;
     },
   },
 });
