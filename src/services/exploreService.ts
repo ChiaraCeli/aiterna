@@ -1,6 +1,5 @@
 import type {
   ExploreRequest,
-  ReadingSection,
   ReadingSource,
 } from "@/types/explore";
 
@@ -11,24 +10,16 @@ interface ExploreStreamCallbacks {
   onChunk: (content: string) => void;
 }
 
-export const generateExploreReading = async (
-  request: ExploreRequest,
-  language: "it" | "en",
-  callbacks: ExploreStreamCallbacks,
-  signal?: AbortSignal,
+const readAIStream = async (
+  response: Response,
+  callbacks: {
+    onMetadata?: (metadata: {
+      title: string;
+      sources: ReadingSource[];
+    }) => void;
+    onChunk: (content: string) => void;
+  },
 ): Promise<void> => {
-  const response = await fetch(`${API_URL}/api/explore`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      ...request,
-      language,
-    }),
-    signal,
-  });
-
   if (!response.ok || !response.body) {
     throw new Error("Unable to generate reading.");
   }
@@ -58,7 +49,7 @@ export const generateExploreReading = async (
 
     switch (event) {
       case "metadata":
-        callbacks.onMetadata(parsed);
+        callbacks.onMetadata?.(parsed);
         break;
 
       case "chunk":
@@ -107,16 +98,51 @@ export const generateExploreReading = async (
   }
 };
 
-// Per ora Tell me more resta mock.
-export const continueExploreReading = async (): Promise<ReadingSection> => {
-  await new Promise((resolve) => setTimeout(resolve, 1000));
 
-  return {
-    id: `continuation-${Date.now()}`,
-    content: `
-And there is still more to discover.
+export const generateExploreReading = async (
+  request: ExploreRequest,
+  language: "it" | "en",
+  callbacks: ExploreStreamCallbacks,
+  signal?: AbortSignal,
+): Promise<void> => {
+  const response = await fetch(`${API_URL}/api/explore`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      ...request,
+      language,
+    }),
+    signal,
+  });
 
-Sometimes the most interesting part of a subject begins just after the obvious facts end. A small detail can open another path, and that path can lead somewhere completely unexpected.
-      `.trim(),
-  };
+  await readAIStream(response, callbacks);
 };
+
+interface ExploreContinuationRequest {
+  title: string;
+  previousContent: string;
+  sourceUrl: string;
+  language: "it" | "en";
+}
+
+export const continueExploreReading = async (
+  request: ExploreContinuationRequest,
+  onChunk: (content: string) => void,
+  signal?: AbortSignal,
+): Promise<void> => {
+  const response = await fetch(`${API_URL}/api/explore/continue`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+    signal,
+  });
+
+  await readAIStream(response, {
+    onChunk,
+  });
+};
+

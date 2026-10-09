@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { useRouter } from "vue-router";
-
+import { usePreferencesStore } from "@/stores/preferences";
 import { useReadingStore } from "@/stores/reading";
 
 const router = useRouter();
 const readingStore = useReadingStore();
+const preferencesStore = usePreferencesStore();
 
 const goBack = () => {
   readingStore.clear();
@@ -46,7 +47,9 @@ const goBack = () => {
           type="button"
           class="reading-view__more"
           :disabled="readingStore.isContinuing"
-          @click="readingStore.continueReading()"
+          @click="
+            readingStore.continueReading(preferencesStore.language ?? 'en')
+          "
         >
           <span v-if="readingStore.isContinuing" class="loading-label">
             <span class="loading-star">✦</span>
@@ -159,6 +162,11 @@ const goBack = () => {
   text-decoration: none;
 }
 
+
+.reading-section + .reading-section {
+  margin-top: 2rem;
+}
+
 .reading-view__more {
   display: flex;
   align-items: center;
@@ -222,5 +230,4 @@ const goBack = () => {
     transform: scale(1.1);
   }
 }
-
 </style>

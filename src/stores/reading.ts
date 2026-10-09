@@ -6,6 +6,7 @@ import { generateExploreReading } from "@/services/exploreService";
 import { continueExploreReading } from "@/services/exploreService";
 
 let generationController: AbortController | null = null;
+let continuationController: AbortController | null = null;
 
 export const useReadingStore = defineStore("reading", {
   state: () => ({
@@ -21,6 +22,12 @@ export const useReadingStore = defineStore("reading", {
       language: "it" | "en",
       onReady?: () => void,
     ) {
+      generationController?.abort();
+      continuationController?.abort();
+
+      continuationController = null;
+      this.isContinuing = false;
+
       const controller = new AbortController();
       generationController = controller;
       this.isLoading = true;
@@ -70,29 +77,92 @@ export const useReadingStore = defineStore("reading", {
       }
     },
 
-    async continueReading() {
-      if (!this.currentReading || this.isContinuing) {
+    async continueReading(language: "it" | "en") {
+      if (!this.currentReading || this.isContinuing || this.isLoading) {
         return;
       }
 
+      const reading = this.currentReading;
+      const sourceUrl = reading.sources[0]?.url;
+
+      if (!sourceUrl) {
+        this.error = "Unable to find the reading source.";
+        return;
+      }
+
+      const previousContent = reading.sections
+        .map((section) => section.content)
+        .join("\n\n");
+
+      const controller = new AbortController();
+      continuationController = controller;
+
+      const newSection = {
+        id: `continuation-${Date.now()}`,
+        content: "",
+      };
+
+      reading.sections.push(newSection);
+
       this.isContinuing = true;
+      this.error = null;
 
       try {
-        const newSection = await continueExploreReading();
+        await continueExploreReading(
+          {
+            title: reading.title,
+            previousContent,
+            sourceUrl,
+            language,
+          },
 
-        this.currentReading.sections.push(newSection);
+          (content) => {
+            if (controller.signal.aborted) return;
+
+            const section = this.currentReading?.sections.find(
+              (section) => section.id === newSection.id,
+            );
+
+            if (section) {
+              section.content += content;
+            }
+          },
+
+          controller.signal,
+        );
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          console.error("Reading continuation error:", error);
+
+          this.error = "Unable to continue reading.";
+
+          if (!newSection.content) {
+            const index = reading.sections.indexOf(newSection);
+
+            if (index !== -1) {
+              reading.sections.splice(index, 1);
+            }
+          }
+        }
       } finally {
-        this.isContinuing = false;
+        if (continuationController === controller) {
+          continuationController = null;
+          this.isContinuing = false;
+        }
       }
     },
 
     clear() {
       generationController?.abort();
+      continuationController?.abort();
+
       generationController = null;
+      continuationController = null;
 
       this.currentReading = null;
       this.error = null;
       this.isLoading = false;
+      this.isContinuing = false;
     },
   },
 });

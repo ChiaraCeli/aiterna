@@ -16,6 +16,13 @@ interface ExploreRequest {
 	language: 'it' | 'en';
 }
 
+interface ExploreContinueRequest {
+	title: string;
+	previousContent: string;
+	sourceUrl: string;
+	language: 'it' | 'en';
+}
+
 interface WikipediaSearchPage {
 	id: number;
 	key: string;
@@ -220,8 +227,161 @@ ${sourceText}
 	return response;
 };
 
+const continueReadingWithAI = async (
+	env: Env,
+	title: string,
+	sourceText: string,
+	previousContent: string,
+	language: 'it' | 'en',
+): Promise<ReadableStream> => {
+	const languageInstruction = language === 'it' ? 'Scrivi in italiano.' : 'Write in English.';
+
+	const response = await env.AI.run('@cf/google/gemma-4-26b-a4b-it', {
+		messages: [
+			{
+				role: 'system',
+				content: `
+You are the writing engine of AIterna,
+a calm generative reading application.
+
+Continue an existing reading about the same topic.
+
+Rules:
+- Use ONLY factual information supported by the source material.
+- Never invent facts, dates, names or events.
+- Do not repeat information already explained.
+- Explore a new detail or a different aspect of the topic.
+- Maintain a calm, immersive and conversational tone.
+- Use natural paragraphs.
+- Do not use headings or bullet points.
+- Do not restart the introduction.
+- Do not mention Wikipedia or the source.
+- Write approximately 300-500 words.
+          `.trim(),
+			},
+			{
+				role: 'user',
+				content: `
+${languageInstruction}
+
+TOPIC:
+${title}
+
+FACTUAL SOURCE MATERIAL:
+${sourceText}
+
+PREVIOUS READING:
+${previousContent}
+
+Continue the reading naturally,
+exploring something new without repeating
+what has already been said.
+          `.trim(),
+			},
+		],
+		chat_template_kwargs: {
+			enable_thinking: false,
+		},
+		stream: true,
+	});
+
+	return response;
+};
+
 const createSSEEvent = (event: string, data: unknown): string => {
 	return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+};
+
+const createAIStreamResponse = (
+	aiStream: ReadableStream,
+	metadata?: {
+		title: string;
+		sources: { title: string; url: string }[];
+	},
+): Response => {
+	const encoder = new TextEncoder();
+	const decoder = new TextDecoder();
+
+	const stream = new ReadableStream<Uint8Array>({
+		async start(controller) {
+			const send = (event: string, data: unknown) => {
+				controller.enqueue(encoder.encode(createSSEEvent(event, data)));
+			};
+
+			if (metadata) {
+				send('metadata', metadata);
+			}
+
+			const reader = aiStream.getReader();
+			let buffer = '';
+
+			const processEvent = (rawEvent: string) => {
+				const data = rawEvent
+					.split('\n')
+					.filter((line) => line.startsWith('data:'))
+					.map((line) => line.slice(5).trimStart())
+					.join('\n');
+
+				if (!data || data === '[DONE]') return;
+
+				try {
+					const parsed = JSON.parse(data);
+
+					const content = parsed.response ?? parsed.choices?.[0]?.delta?.content;
+
+					if (typeof content === 'string' && content) {
+						send('chunk', { content });
+					}
+				} catch {
+					console.warn('Unrecognized AI stream event');
+				}
+			};
+
+			try {
+				while (true) {
+					const { done, value } = await reader.read();
+
+					if (done) break;
+
+					buffer += decoder.decode(value, { stream: true });
+					buffer = buffer.replace(/\r\n/g, '\n');
+
+					const events = buffer.split('\n\n');
+					buffer = events.pop() ?? '';
+
+					for (const rawEvent of events) {
+						processEvent(rawEvent);
+					}
+				}
+
+				buffer += decoder.decode();
+
+				if (buffer.trim()) {
+					processEvent(buffer);
+				}
+
+				send('done', {});
+			} catch (error) {
+				console.error('AI streaming error:', error);
+
+				send('error', {
+					message: 'Unable to complete reading.',
+				});
+			} finally {
+				reader.releaseLock();
+				controller.close();
+			}
+		},
+	});
+
+	return new Response(stream, {
+		headers: {
+			...corsHeaders,
+			'Content-Type': 'text/event-stream; charset=utf-8',
+			'Cache-Control': 'no-cache',
+			'X-Content-Type-Options': 'nosniff',
+		},
+	});
 };
 
 export default {
@@ -276,89 +436,14 @@ export default {
 
 				const aiStream = await generateReadingWithAI(env, page.title, sourceMaterial, body.language, body.length);
 
-				const encoder = new TextEncoder();
-				const decoder = new TextDecoder();
-
-				const stream = new ReadableStream<Uint8Array>({
-					async start(controller) {
-						const send = (event: string, data: unknown) => {
-							controller.enqueue(encoder.encode(createSSEEvent(event, data)));
-						};
-
-						send('metadata', {
-							title: page.title,
-							sources: [
-								{
-									title: `Wikipedia — ${page.title}`,
-									url: `${wikiBaseUrl}${encodeURIComponent(page.key)}`,
-								},
-							],
-						});
-
-						const reader = aiStream.getReader();
-						let buffer = '';
-
-						try {
-							while (true) {
-								const { done, value } = await reader.read();
-
-								if (done) break;
-
-								buffer += decoder.decode(value, { stream: true });
-
-								// Normalizziamo le interruzioni di riga SSE.
-								buffer = buffer.replace(/\r\n/g, '\n');
-
-								const events = buffer.split('\n\n');
-								buffer = events.pop() ?? '';
-
-								for (const rawEvent of events) {
-									const dataLines = rawEvent
-										.split('\n')
-										.filter((line) => line.startsWith('data:'))
-										.map((line) => line.slice(5).trimStart());
-
-									if (dataLines.length === 0) continue;
-
-									const data = dataLines.join('\n');
-
-									if (data === '[DONE]') continue;
-
-									try {
-										const parsed = JSON.parse(data);
-
-										const content = parsed.response ?? parsed.choices?.[0]?.delta?.content;
-
-										if (typeof content === 'string' && content) {
-											send('chunk', { content });
-										}
-									} catch {
-										console.warn('Unrecognized AI stream event');
-									}
-								}
-							}
-
-							send('done', {});
-						} catch (error) {
-							console.error('AI streaming error:', error);
-
-							send('error', {
-								message: 'Unable to complete reading.',
-							});
-						} finally {
-							reader.releaseLock();
-							controller.close();
-						}
-					},
-				});
-
-				return new Response(stream, {
-					headers: {
-						...corsHeaders,
-						'Content-Type': 'text/event-stream; charset=utf-8',
-						'Cache-Control': 'no-cache',
-						'X-Content-Type-Options': 'nosniff',
-					},
+				return createAIStreamResponse(aiStream, {
+					title: page.title,
+					sources: [
+						{
+							title: `Wikipedia — ${page.title}`,
+							url: `${wikiBaseUrl}${encodeURIComponent(page.key)}`,
+						},
+					],
 				});
 			} catch (error) {
 				console.error(error);
@@ -372,6 +457,69 @@ export default {
 						headers: corsHeaders,
 					},
 				);
+			}
+		}
+
+		if (request.method === 'POST' && url.pathname === '/api/explore/continue') {
+			try {
+				const body = await request.json<ExploreContinueRequest>();
+
+				
+				if (
+					typeof body.title !== 'string' ||
+					!body.title.trim() ||
+					typeof body.previousContent !== 'string' ||
+					!body.previousContent.trim() ||
+					typeof body.sourceUrl !== 'string' ||
+					(body.language !== 'it' && body.language !== 'en')
+				) {
+					return Response.json({ error: 'Invalid continuation request.' }, { status: 400, headers: corsHeaders });
+				}
+
+				
+				if (body.title.length > 300 || body.previousContent.length > 20000) {
+					return Response.json({ error: 'Reading context is too long.' }, { status: 400, headers: corsHeaders });
+				}
+
+				
+				let sourceUrl: URL;
+
+				try {
+					sourceUrl = new URL(body.sourceUrl);
+				} catch {
+					return Response.json({ error: 'Invalid source URL.' }, { status: 400, headers: corsHeaders });
+				}
+
+				const expectedHost = body.language === 'it' ? 'it.wikipedia.org' : 'en.wikipedia.org';
+
+				if (
+					sourceUrl.protocol !== 'https:' ||
+					sourceUrl.hostname !== expectedHost ||
+					sourceUrl.port !== '' ||
+					sourceUrl.username !== '' ||
+					sourceUrl.password !== '' ||
+					!sourceUrl.pathname.startsWith('/wiki/') ||
+					sourceUrl.pathname.length <= '/wiki/'.length
+				) {
+					return Response.json({ error: 'Unsupported source URL.' }, { status: 400, headers: corsHeaders });
+				}
+
+				const pageKey = sourceUrl.pathname.slice('/wiki/'.length);
+				const pageTitle = decodeURIComponent(pageKey).replace(/_/g, ' ');
+
+				const extract = await getWikipediaExtract(pageTitle, body.language);
+
+				const sourceMaterial = extract.slice(0, 12000);
+
+				// 4. Generiamo la continuazione con l'AI.
+				const aiStream = await continueReadingWithAI(env, pageTitle, sourceMaterial, body.previousContent, body.language);
+
+				// 5. Restituiamo lo streaming SSE.
+				return createAIStreamResponse(aiStream);
+			} catch (error) {
+				console.error('Explore continuation error:', error);
+
+				return Response.json({ error: 'Unable to continue reading.' }, { status: 500, headers: corsHeaders });
 			}
 		}
 
