@@ -14,6 +14,7 @@ interface ExploreRequest {
 	length: 'short' | 'medium' | 'long';
 	customTopic?: string;
 	language: 'it' | 'en';
+	recentArticleIds?: number[];
 }
 
 interface ExploreContinueRequest {
@@ -54,50 +55,45 @@ const corsHeaders = {
 	'Access-Control-Allow-Headers': 'Content-Type',
 };
 
-const topicsByCategory: Record<Exclude<ExploreRequest['category'], 'custom' | 'surprise'>, string[]> = {
-	history: ['ancient civilizations', 'medieval history', 'lost cities', 'historical mysteries', 'ancient inventions'],
+const wikipediaCategories: Partial<Record<ExploreRequest['category'], { it: string[]; en: string[] }>> = {
+	animals: {
+		it: ['Categoria:Zoologia'],
+		en: ['Category:Zoology'],
+	},
+	history: {
+		it: ['Categoria:Storia'],
+		en: ['Category:History'],
+	},
+	nature: {
+		it: ['Categoria:Natura'],
+		en: ['Category:Nature'],
+	},
+	space: {
+		it: ['Categoria:Astronomia'],
+		en: ['Category:Astronomy'],
+	},
+	places: {
+		it: ['Categoria:Geografia'],
+		en: ['Category:Geography'],
+	},
 
-	nature: ['bioluminescence', 'deep sea ecosystems', 'rare natural phenomena', 'ancient forests', 'volcanoes'],
+	curiosities: {
+		it: ['Categoria:Scienza', 'Categoria:Tecnologia', 'Categoria:Storia', 'Categoria:Fenomeni naturali'],
+		en: ['Category:Science', 'Category:Technology', 'Category:History', 'Category:Natural phenomena'],
+	},
 
-	animals: ['octopus intelligence', 'axolotl', 'tardigrade', 'lyrebird', 'animal cognition'],
-
-	space: ['exoplanets', 'black holes', 'neutron stars', 'Jupiter moons', 'deep space'],
-
-	places: ['remote islands', 'underground cities', 'ancient villages', 'unusual landscapes', 'abandoned places'],
-
-	curiosities: [
-		'strange historical facts',
-		'unusual scientific discoveries',
-		'unexpected inventions',
-		'rare phenomena',
-		'curious coincidences',
-	],
-
-	psychology: ['memory psychology', 'dream psychology', 'cognitive biases', 'déjà vu', 'human perception'],
-
-	mysteries: ['unsolved historical mysteries', 'folklore legends', 'mysterious manuscripts', 'ghost ships', 'ancient legends'],
-
-	crime: ['historical criminal cases', 'unsolved crimes', 'forensic science history', 'famous investigations', 'criminal psychology'],
-};
-
-const getRandomItem = <T>(items: T[]): T => {
-	return items[Math.floor(Math.random() * items.length)];
-};
-
-const getSearchQuery = (body: ExploreRequest): string => {
-	if (body.category === 'custom') {
-		return body.customTopic?.trim() || '';
-	}
-
-	if (body.category === 'surprise') {
-		const categories = Object.keys(topicsByCategory) as (keyof typeof topicsByCategory)[];
-
-		const randomCategory = getRandomItem(categories);
-
-		return getRandomItem(topicsByCategory[randomCategory]);
-	}
-
-	return getRandomItem(topicsByCategory[body.category]);
+	psychology: {
+		it: ['Categoria:Psicologia', 'Categoria:Processi cognitivi'],
+		en: ['Category:Psychology', 'Category:Cognitive processes'],
+	},
+	mysteries: {
+		it: ['Categoria:Folclore', 'Categoria:Mitologia'],
+		en: ['Category:Folklore', 'Category:Mythology'],
+	},
+	crime: {
+		it: ['Categoria:Criminologia', 'Categoria:Criminalità'],
+		en: ['Category:Criminology', 'Category:Crime'],
+	},
 };
 
 const searchWikipedia = async (query: string, language: ExploreRequest['language']) => {
@@ -121,6 +117,210 @@ const searchWikipedia = async (query: string, language: ExploreRequest['language
 	const data = await response.json<WikipediaSearchResponse>();
 
 	return data.pages;
+};
+
+const getRandomWikipediaPage = async (language: ExploreRequest['language']): Promise<WikipediaSearchPage> => {
+	const wikipediaLanguage = language === 'it' ? 'it' : 'en';
+
+	const url = new URL(`https://${wikipediaLanguage}.wikipedia.org/w/api.php`);
+
+	url.searchParams.set('action', 'query');
+	url.searchParams.set('format', 'json');
+	url.searchParams.set('generator', 'random');
+	url.searchParams.set('grnnamespace', '0');
+	url.searchParams.set('grnlimit', '1');
+
+	const response = await fetch(url.toString(), {
+		headers: {
+			'User-Agent': 'AIterna/0.1',
+		},
+	});
+
+	if (!response.ok) {
+		throw new Error(`Wikipedia random request failed: ${response.status}`);
+	}
+
+	const data = await response.json<{
+		query?: {
+			pages: Record<
+				string,
+				{
+					pageid: number;
+					ns: number;
+					title: string;
+				}
+			>;
+		};
+	}>();
+
+	const page = Object.values(data.query?.pages ?? {})[0];
+
+	if (!page) {
+		throw new Error('No random Wikipedia page found.');
+	}
+
+	return {
+		id: page.pageid,
+		key: page.title.replace(/ /g, '_'),
+		title: page.title,
+		excerpt: '',
+		description: null,
+	};
+};
+
+interface WikipediaCategoryMember {
+	pageid: number;
+	ns: number;
+	title: string;
+}
+
+const categoryCache = new Map<
+	string,
+	{
+		members: WikipediaCategoryMember[];
+		expiresAt: number;
+	}
+>();
+
+const CATEGORY_CACHE_TTL = 30 * 60 * 1000;
+
+const getWikipediaCategoryMembers = async (category: string, language: ExploreRequest['language']): Promise<WikipediaCategoryMember[]> => {
+	const wikipediaLanguage = language === 'it' ? 'it' : 'en';
+
+	const cacheKey = `${wikipediaLanguage}:${category}`;
+
+	const cached = categoryCache.get(cacheKey);
+
+	if (cached && cached.expiresAt > Date.now()) {
+		return cached.members;
+	}
+
+	const maxPages = 1;
+	const members: WikipediaCategoryMember[] = [];
+
+	let continueToken: string | undefined;
+
+	for (let page = 0; page < maxPages; page++) {
+		const url = new URL(`https://${wikipediaLanguage}.wikipedia.org/w/api.php`);
+
+		url.searchParams.set('action', 'query');
+		url.searchParams.set('format', 'json');
+		url.searchParams.set('list', 'categorymembers');
+		url.searchParams.set('cmtitle', category);
+		url.searchParams.set('cmtype', 'page|subcat');
+		url.searchParams.set('cmlimit', '100');
+
+		if (continueToken) {
+			url.searchParams.set('cmcontinue', continueToken);
+		}
+
+		const response = await fetch(url.toString(), {
+			headers: {
+				'User-Agent': 'AIterna/0.1',
+			},
+		});
+
+		if (!response.ok) {
+			throw new Error(`Wikipedia category request failed: ${response.status}`);
+		}
+
+		const data = await response.json<{
+			continue?: {
+				cmcontinue?: string;
+			};
+			query?: {
+				categorymembers: WikipediaCategoryMember[];
+			};
+		}>();
+
+		members.push(...(data.query?.categorymembers ?? []));
+
+		continueToken = data.continue?.cmcontinue;
+
+		if (!continueToken) {
+			break;
+		}
+	}
+
+	categoryCache.set(cacheKey, {
+		members,
+		expiresAt: Date.now() + CATEGORY_CACHE_TTL,
+	});
+
+	return members;
+};
+
+const isRecentArticle = (articleId: number, recentArticleIds: number[] = []): boolean => {
+	return recentArticleIds.includes(articleId);
+};
+
+const getRandomArticleFromCategory = async (
+	rootCategory: string,
+	language: ExploreRequest['language'],
+	recentArticleIds: number[] = [],
+): Promise<{ page: WikipediaSearchPage; extract: string } | null> => {
+	const maxDepth = 3;
+	const maxAttempts = 3;
+	const minExtractLength = 1000;
+
+	for (let attempt = 0; attempt < maxAttempts; attempt++) {
+		let currentCategory = rootCategory;
+		const visitedCategories = new Set<string>();
+
+		for (let depth = 0; depth < maxDepth; depth++) {
+			if (visitedCategories.has(currentCategory)) {
+				break;
+			}
+
+			visitedCategories.add(currentCategory);
+
+			const members = await getWikipediaCategoryMembers(currentCategory, language);
+
+			const articles = members.filter((member) => member.ns === 0 && !isRecentArticle(member.pageid, recentArticleIds));
+
+			const subcategories = members.filter((member) => member.ns === 14);
+
+			const exploreSubcategory = subcategories.length > 0 && (articles.length === 0 || Math.random() < 0.65) && depth < maxDepth - 1;
+
+			if (exploreSubcategory) {
+				const randomIndex = Math.floor(Math.random() * subcategories.length);
+
+				currentCategory = subcategories[randomIndex]!.title;
+				continue;
+			}
+
+			if (articles.length > 0) {
+				const randomIndex = Math.floor(Math.random() * articles.length);
+
+				const selectedArticle = articles[randomIndex]!;
+
+				let extract = '';
+
+				try {
+					extract = await getWikipediaExtract(selectedArticle.title, language);
+				} catch (error) {
+					console.warn(`Skipping Wikipedia article: ${selectedArticle.title}`, error);
+				}
+
+				if (extract.trim().length >= minExtractLength) {
+					return {
+						page: {
+							id: selectedArticle.pageid,
+							key: selectedArticle.title.replace(/ /g, '_'),
+							title: selectedArticle.title,
+							excerpt: '',
+							description: null,
+						},
+						extract,
+					};
+				}
+			}
+
+			break;
+		}
+	}
+
+	return null;
 };
 
 const getWikipediaExtract = async (title: string, language: ExploreRequest['language']): Promise<string> => {
@@ -294,8 +494,10 @@ const createSSEEvent = (event: string, data: unknown): string => {
 
 const createAIStreamResponse = (
 	aiStream: ReadableStream,
+
 	metadata?: {
 		title: string;
+		articleId?: number;
 		sources: { title: string; url: string }[];
 	},
 ): Response => {
@@ -399,37 +601,100 @@ export default {
 			try {
 				const body = await request.json<ExploreRequest>();
 
-				const query = getSearchQuery(body);
+				let page: WikipediaSearchPage;
+				let extract = '';
 
-				if (!query) {
-					return Response.json(
-						{
-							error: 'Missing search topic.',
-						},
-						{
-							status: 400,
-							headers: corsHeaders,
-						},
-					);
+				if (body.category === 'surprise') {
+					const maxAttempts = 5;
+					const minExtractLength = 1000;
+
+					let validPage: WikipediaSearchPage | null = null;
+
+					for (let attempt = 0; attempt < maxAttempts; attempt++) {
+						const randomPage = await getRandomWikipediaPage(body.language);
+
+						if (isRecentArticle(randomPage.id, body.recentArticleIds ?? [])) {
+							continue;
+						}
+
+						const randomExtract = await getWikipediaExtract(randomPage.title, body.language);
+
+						if (randomExtract.trim().length >= minExtractLength) {
+							validPage = randomPage;
+							extract = randomExtract;
+							break;
+						}
+					}
+
+					if (!validPage) {
+						return Response.json({ error: 'Unable to find a suitable Wikipedia article.' }, { status: 404, headers: corsHeaders });
+					}
+
+					page = validPage;
+				} else if (wikipediaCategories[body.category]) {
+					const categoryConfig = wikipediaCategories[body.category];
+
+					if (!categoryConfig) {
+						throw new Error('Wikipedia category not configured.');
+					}
+
+					const rootCategories = [...categoryConfig[body.language]];
+
+					for (let i = rootCategories.length - 1; i > 0; i--) {
+						const j = Math.floor(Math.random() * (i + 1));
+
+						[rootCategories[i], rootCategories[j]] = [rootCategories[j]!, rootCategories[i]!];
+					}
+
+					let result: Awaited<ReturnType<typeof getRandomArticleFromCategory>> = null;
+
+					for (const rootCategory of rootCategories) {
+						result = await getRandomArticleFromCategory(rootCategory, body.language, body.recentArticleIds ?? []);
+
+						if (result) {
+							break;
+						}
+					}
+
+					if (!result && (body.recentArticleIds?.length ?? 0) > 0) {
+						for (const rootCategory of rootCategories) {
+							result = await getRandomArticleFromCategory(rootCategory, body.language, []);
+
+							if (result) {
+								break;
+							}
+						}
+					}
+
+					if (!result) {
+						return Response.json({ error: 'Unable to find a suitable Wikipedia article.' }, { status: 404, headers: corsHeaders });
+					}
+
+					page = result.page;
+					extract = result.extract;
+				} else {
+					if (body.category !== 'custom') {
+						return Response.json({ error: 'Unsupported category.' }, { status: 400, headers: corsHeaders });
+					}
+
+					const query = body.customTopic?.trim();
+
+					if (!query) {
+						return Response.json({ error: 'Missing search topic.' }, { status: 400, headers: corsHeaders });
+					}
+
+					const pages = await searchWikipedia(query, body.language);
+
+					const selectedPage = pages[0];
+
+					if (!selectedPage) {
+						return Response.json({ error: 'No Wikipedia page found.' }, { status: 404, headers: corsHeaders });
+					}
+
+					page = selectedPage;
+					extract = await getWikipediaExtract(page.title, body.language);
 				}
 
-				const pages = await searchWikipedia(query, body.language);
-
-				const page = pages[0];
-
-				if (!page) {
-					return Response.json(
-						{
-							error: 'No Wikipedia page found.',
-						},
-						{
-							status: 404,
-							headers: corsHeaders,
-						},
-					);
-				}
-
-				const extract = await getWikipediaExtract(page.title, body.language);
 				const sourceMaterial = extract.slice(0, 12000);
 
 				const wikiBaseUrl = body.language === 'it' ? 'https://it.wikipedia.org/wiki/' : 'https://en.wikipedia.org/wiki/';
@@ -438,6 +703,7 @@ export default {
 
 				return createAIStreamResponse(aiStream, {
 					title: page.title,
+					articleId: page.id,
 					sources: [
 						{
 							title: `Wikipedia — ${page.title}`,
@@ -464,7 +730,6 @@ export default {
 			try {
 				const body = await request.json<ExploreContinueRequest>();
 
-				
 				if (
 					typeof body.title !== 'string' ||
 					!body.title.trim() ||
@@ -476,12 +741,10 @@ export default {
 					return Response.json({ error: 'Invalid continuation request.' }, { status: 400, headers: corsHeaders });
 				}
 
-				
 				if (body.title.length > 300 || body.previousContent.length > 20000) {
 					return Response.json({ error: 'Reading context is too long.' }, { status: 400, headers: corsHeaders });
 				}
 
-				
 				let sourceUrl: URL;
 
 				try {

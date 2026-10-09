@@ -17,6 +17,7 @@ export interface ExploreRequest {
   category: ExploreCategory
   length: ReadingLength
   customTopic?: string
+  recentArticleIds?: number[];
 }
 
 export interface ReadingSource {

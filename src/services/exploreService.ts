@@ -3,20 +3,26 @@ import type {
   ReadingSource,
 } from "@/types/explore";
 
+
 const API_URL = "http://localhost:8787";
 
+
+interface ExploreStreamMetadata {
+  title: string;
+  articleId?: number;
+  sources: ReadingSource[];
+}
+
+
 interface ExploreStreamCallbacks {
-  onMetadata: (metadata: { title: string; sources: ReadingSource[] }) => void;
+  onMetadata: (metadata: ExploreStreamMetadata) => void;
   onChunk: (content: string) => void;
 }
 
 const readAIStream = async (
   response: Response,
   callbacks: {
-    onMetadata?: (metadata: {
-      title: string;
-      sources: ReadingSource[];
-    }) => void;
+    onMetadata?: (metadata: ExploreStreamMetadata) => void;
     onChunk: (content: string) => void;
   },
 ): Promise<void> => {

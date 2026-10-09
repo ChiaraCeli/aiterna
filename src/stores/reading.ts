@@ -14,9 +14,30 @@ export const useReadingStore = defineStore("reading", {
     isLoading: false,
     error: null as string | null,
     isContinuing: false,
+
+    recentArticleIds: {
+      it: [] as number[],
+      en: [] as number[],
+    },
   }),
 
   actions: {
+    rememberArticle(articleId: number, language: "it" | "en") {
+      const recent = this.recentArticleIds[language];
+
+      const existingIndex = recent.indexOf(articleId);
+
+      if (existingIndex !== -1) {
+        recent.splice(existingIndex, 1);
+      }
+
+      recent.push(articleId);
+
+      if (recent.length > 20) {
+        recent.shift();
+      }
+    },
+
     async generate(
       request: ExploreRequest,
       language: "it" | "en",
@@ -36,11 +57,19 @@ export const useReadingStore = defineStore("reading", {
 
       try {
         await generateExploreReading(
-          request,
+          {
+            ...request,
+            recentArticleIds: [...this.recentArticleIds[language]],
+          },
           language,
+
           {
             onMetadata: (metadata) => {
               if (controller.signal.aborted) return;
+
+              if (typeof metadata.articleId === "number") {
+                this.rememberArticle(metadata.articleId, language);
+              }
 
               this.currentReading = {
                 title: metadata.title,
