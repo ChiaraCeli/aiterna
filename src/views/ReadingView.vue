@@ -90,11 +90,13 @@ const goBack = () => {
   padding: 2rem var(--space-lg) 4rem;
 }
 
+
 .reading-view__container {
   width: 100%;
-  max-width: var(--content-width);
+  max-width: 760px;
   margin: 0 auto;
 }
+
 
 .reading-view__back {
   display: grid;
@@ -133,15 +135,22 @@ const goBack = () => {
   line-height: 1.15;
 }
 
-.reading-view__content {
-  white-space: pre-line;
 
+.reading-view__content {
   color: var(--color-text-primary);
 
   font-family: var(--font-reading);
-  font-size: 1.08rem;
-  line-height: 1.85;
+  font-size: clamp(1.08rem, 1.5vw, 1.2rem);
+  font-weight: 400;
+  line-height: 1.9;
+  letter-spacing: 0.005em;
 }
+
+.reading-section {
+  white-space: pre-line;
+  overflow-wrap: break-word;
+}
+
 
 .reading-view__sources {
   display: flex;
@@ -163,9 +172,13 @@ const goBack = () => {
 }
 
 
+
 .reading-section + .reading-section {
-  margin-top: 2rem;
+  margin-top: 2.5rem;
+  padding-top: 2.5rem;
+  border-top: 1px solid var(--color-border);
 }
+
 
 .reading-view__more {
   display: flex;
@@ -230,4 +243,28 @@ const goBack = () => {
     transform: scale(1.1);
   }
 }
+
+
+@media (max-width: 600px) {
+  .reading-view {
+    padding: 1.5rem var(--space-lg) 3rem;
+  }
+
+  .reading-view__back {
+    width: 46px;
+    height: 46px;
+    margin-bottom: 2rem;
+  }
+
+  .reading-view h1 {
+    margin-bottom: 1.75rem;
+    font-size: clamp(1.9rem, 8vw, 2.6rem);
+  }
+
+  .reading-view__content {
+    font-size: 1.08rem;
+    line-height: 1.85;
+  }
+}
+
 </style>
