@@ -24,6 +24,41 @@ interface ExploreContinueRequest {
 	language: 'it' | 'en';
 }
 
+interface StartStoryRequest {
+	prompt: string;
+	language: 'it' | 'en';
+}
+
+interface GeneratedStoryScene {
+	title: string;
+	content: string;
+	choices: {
+		id: string;
+		text: string;
+	}[];
+}
+
+interface StoryChoice {
+	id: string;
+	text: string;
+}
+
+interface StoryHistoryScene {
+	content: string;
+	choices: {
+		id: string;
+		text: string;
+	}[];
+	selectedChoiceId: string | null;
+}
+
+interface ContinueStoryRequest {
+	prompt: string;
+	title: string;
+	language: 'it' | 'en';
+	scenes: StoryHistoryScene[];
+}
+
 interface WikipediaSearchPage {
 	id: number;
 	key: string;
@@ -488,6 +523,368 @@ what has already been said.
 	return response;
 };
 
+const generateStoryWithAI = async (env: Env, prompt: string, language: 'it' | 'en'): Promise<GeneratedStoryScene> => {
+	const languageInstruction = language === 'it' ? 'Write in Italian.' : 'Write in English.';
+
+	const response = await env.AI.run('@cf/google/gemma-4-26b-a4b-it', {
+		messages: [
+			{
+				role: 'system',
+				content: `
+You are the creative storytelling engine of AIterna,
+an immersive nighttime reading application.
+
+Write the opening scene of an original interactive story.
+
+Rules:
+- Follow the user's premise and creative intent.
+- Write immersive prose with natural paragraphs.
+- Introduce an interesting situation and meaningful tension.
+- Maintain a coherent narrative perspective and tone.
+- Keep the storytelling engaging but suitable for relaxed reading.
+- Do not use headings inside the narrative.
+- Do not include the five choices in the narrative text.
+- Write approximately 350-500 words.
+- End the scene at a natural decision point.
+- Generate exactly five distinct choices.
+- Each choice must lead to a meaningfully different development.
+- Keep each choice short and easy to understand.
+- Do not resolve the entire story in the first scene.
+
+Return ONLY valid JSON with this exact structure:
+{
+  "title": "Story title",
+  "content": "Narrative scene",
+  "choices": [
+    {"id": "1", "text": "First choice"},
+    {"id": "2", "text": "Second choice"},
+    {"id": "3", "text": "Third choice"},
+    {"id": "4", "text": "Fourth choice"},
+    {"id": "5", "text": "Fifth choice"}
+  ]
+}
+
+Do not include markdown code fences or explanations.
+        `.trim(),
+			},
+			{
+				role: 'user',
+				content: `
+${languageInstruction}
+
+STORY PREMISE:
+${prompt}
+        `.trim(),
+			},
+		],
+		chat_template_kwargs: {
+			enable_thinking: false,
+		},
+	});
+
+	const rawResponse = response.choices?.[0]?.message?.content;
+
+	if (typeof rawResponse !== 'string') {
+		throw new Error('AI returned an invalid story response.');
+	}
+
+	const cleanedResponse = rawResponse
+		.trim()
+		.replace(/^```(?:json)?\s*/i, '')
+		.replace(/\s*```$/, '');
+
+	const parsed: unknown = JSON.parse(cleanedResponse);
+
+	if (typeof parsed !== 'object' || parsed === null || !('title' in parsed) || !('content' in parsed) || !('choices' in parsed)) {
+		throw new Error('AI returned an incomplete story.');
+	}
+
+	const story = parsed as GeneratedStoryScene;
+
+	if (
+		typeof story.title !== 'string' ||
+		!story.title.trim() ||
+		typeof story.content !== 'string' ||
+		!story.content.trim() ||
+		!Array.isArray(story.choices) ||
+		story.choices.length !== 5 ||
+		!story.choices.every((choice) => typeof choice.id === 'string' && typeof choice.text === 'string' && choice.text.trim().length > 0) ||
+		new Set(story.choices.map((choice) => choice.id)).size !== 5
+	) {
+		throw new Error('AI returned an invalid story structure.');
+	}
+
+	return story;
+};
+
+const continueStoryWithAI = async (env: Env, body: ContinueStoryRequest): Promise<GeneratedStoryScene> => {
+	const languageInstruction = body.language === 'it' ? 'Write in Italian.' : 'Write in English.';
+
+	const history = body.scenes
+		.map((scene, index) => {
+			const selectedChoice = scene.choices.find((choice) => choice.id === scene.selectedChoiceId);
+
+			return `
+SCENE ${index + 1}:
+${scene.content}
+
+READER'S DECISION:
+${selectedChoice?.text ?? 'No decision'}
+      `.trim();
+		})
+		.join('\n\n');
+
+	const response = await env.AI.run('@cf/google/gemma-4-26b-a4b-it', {
+		messages: [
+			{
+				role: 'system',
+				content: `
+You are the creative storytelling engine of AIterna,
+an immersive nighttime reading application.
+
+Continue an existing interactive story.
+
+Rules:
+- Maintain continuity with all previous scenes.
+- Respect the reader's decisions.
+- Continue directly from the last selected choice.
+- Preserve established characters, locations and events.
+- Do not restart or summarize the story.
+- Write immersive prose with natural paragraphs.
+- Maintain a coherent narrative perspective and tone.
+- Write approximately 350-500 words.
+- End the scene at a meaningful decision point.
+- Generate exactly five distinct choices.
+- Each choice must lead to a different development.
+- Do not include choices inside the narrative text.
+- Do not end the entire story unless the narrative naturally requires it.
+
+Return ONLY valid JSON:
+{
+  "title": "Existing story title",
+  "content": "Next narrative scene",
+  "choices": [
+    {"id": "1", "text": "First choice"},
+    {"id": "2", "text": "Second choice"},
+    {"id": "3", "text": "Third choice"},
+    {"id": "4", "text": "Fourth choice"},
+    {"id": "5", "text": "Fifth choice"}
+  ]
+}
+
+Do not include markdown code fences or explanations.
+        `.trim(),
+			},
+			{
+				role: 'user',
+				content: `
+${languageInstruction}
+
+ORIGINAL STORY PREMISE:
+${body.prompt}
+
+STORY TITLE:
+${body.title}
+
+STORY HISTORY:
+${history}
+
+Continue the story after the reader's latest decision.
+        `.trim(),
+			},
+		],
+		chat_template_kwargs: {
+			enable_thinking: false,
+		},
+	});
+
+	const rawResponse = response.choices?.[0]?.message?.content;
+
+	if (typeof rawResponse !== 'string') {
+		throw new Error('AI returned an invalid continuation response.');
+	}
+
+	const cleanedResponse = rawResponse
+		.trim()
+		.replace(/^```(?:json)?\s*/i, '')
+		.replace(/\s*```$/, '');
+
+	const parsed: unknown = JSON.parse(cleanedResponse);
+
+	if (typeof parsed !== 'object' || parsed === null || !('title' in parsed) || !('content' in parsed) || !('choices' in parsed)) {
+		throw new Error('AI returned an incomplete continuation.');
+	}
+
+	const story = parsed as GeneratedStoryScene;
+
+	if (
+		typeof story.title !== 'string' ||
+		typeof story.content !== 'string' ||
+		!story.content.trim() ||
+		!Array.isArray(story.choices) ||
+		story.choices.length !== 5 ||
+		!story.choices.every((choice) => typeof choice.id === 'string' && typeof choice.text === 'string' && choice.text.trim().length > 0) ||
+		new Set(story.choices.map((choice) => choice.id)).size !== 5
+	) {
+		throw new Error('AI returned an invalid continuation structure.');
+	}
+
+	return story;
+};
+
+const streamStoryNarrative = async (env: Env, body: ContinueStoryRequest): Promise<ReadableStream> => {
+	const languageInstruction = body.language === 'it' ? 'Write the entire narrative in Italian.' : 'Write the entire narrative in English.';
+
+	const history = body.scenes
+		.map((scene, index) => {
+			const selectedChoice = scene.choices.find((choice) => choice.id === scene.selectedChoiceId);
+
+			return `
+SCENE ${index + 1}:
+${scene.content}
+
+READER'S DECISION:
+${selectedChoice?.text ?? 'No decision'}
+      `.trim();
+		})
+		.join('\n\n');
+
+	const response = await env.AI.run('@cf/google/gemma-4-26b-a4b-it', {
+		messages: [
+			{
+				role: 'system',
+				content: `
+You are the creative storytelling engine of AIterna,
+an immersive nighttime reading application.
+
+Continue the existing interactive story.
+
+Rules:
+- Maintain continuity with previous scenes.
+- Respect all reader decisions.
+- Continue directly from the latest selected choice.
+- Preserve established characters, locations and events.
+- Do not restart or summarize the story.
+- Write approximately 350-500 words.
+- Use immersive prose with natural paragraphs.
+- Maintain the established narrative perspective and tone.
+- End at a meaningful decision point.
+- Do not resolve the entire story.
+- Do not generate choices.
+- Do not generate JSON.
+- Do not include headings, explanations or markdown.
+- Output ONLY the narrative text.
+          `.trim(),
+			},
+			{
+				role: 'user',
+				content: `
+${languageInstruction}
+
+ORIGINAL PREMISE:
+${body.prompt}
+
+STORY TITLE:
+${body.title}
+
+PREVIOUS SCENES:
+${history}
+
+Write the next scene.
+          `.trim(),
+			},
+		],
+		chat_template_kwargs: {
+			enable_thinking: false,
+		},
+		stream: true,
+	});
+
+	return response;
+};
+
+const generateStoryChoices = async (env: Env, body: ContinueStoryRequest, newSceneContent: string): Promise<StoryChoice[]> => {
+	const languageInstruction = body.language === 'it' ? 'Write all choices in Italian.' : 'Write all choices in English.';
+
+	const response = await env.AI.run('@cf/google/gemma-4-26b-a4b-it', {
+		messages: [
+			{
+				role: 'system',
+				content: `
+You generate interactive choices for AIterna stories.
+
+Rules:
+- Generate exactly five distinct choices.
+- Each choice must lead to a meaningfully different development.
+- All choices must be consistent with the current scene.
+- Keep each choice short and clear.
+- Do not continue the narrative.
+- Return ONLY valid JSON.
+
+Required JSON structure:
+{
+  "choices": [
+    {"id": "1", "text": "First choice"},
+    {"id": "2", "text": "Second choice"},
+    {"id": "3", "text": "Third choice"},
+    {"id": "4", "text": "Fourth choice"},
+    {"id": "5", "text": "Fifth choice"}
+  ]
+}
+
+Do not include markdown code fences or explanations.
+          `.trim(),
+			},
+			{
+				role: 'user',
+				content: `
+${languageInstruction}
+
+STORY TITLE:
+${body.title}
+
+LATEST SCENE:
+${newSceneContent}
+
+Generate five choices for what happens next.
+          `.trim(),
+			},
+		],
+		chat_template_kwargs: {
+			enable_thinking: false,
+		},
+	});
+
+	const rawResponse = response.choices?.[0]?.message?.content;
+
+	if (typeof rawResponse !== 'string') {
+		throw new Error('AI returned invalid story choices.');
+	}
+
+	const cleanedResponse = rawResponse
+		.trim()
+		.replace(/^```(?:json)?\s*/i, '')
+		.replace(/\s*```$/, '');
+
+	const parsed: unknown = JSON.parse(cleanedResponse);
+
+	if (typeof parsed !== 'object' || parsed === null || !('choices' in parsed) || !Array.isArray(parsed.choices)) {
+		throw new Error('AI returned an invalid choices structure.');
+	}
+
+	const choices = parsed.choices as StoryChoice[];
+
+	if (
+		choices.length !== 5 ||
+		!choices.every((choice) => typeof choice.id === 'string' && typeof choice.text === 'string' && choice.text.trim().length > 0) ||
+		new Set(choices.map((choice) => choice.id)).size !== 5
+	) {
+		throw new Error('AI returned invalid story choices.');
+	}
+
+	return choices;
+};
+
 const createSSEEvent = (event: string, data: unknown): string => {
 	return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 };
@@ -568,6 +965,101 @@ const createAIStreamResponse = (
 
 				send('error', {
 					message: 'Unable to complete reading.',
+				});
+			} finally {
+				reader.releaseLock();
+				controller.close();
+			}
+		},
+	});
+
+	return new Response(stream, {
+		headers: {
+			...corsHeaders,
+			'Content-Type': 'text/event-stream; charset=utf-8',
+			'Cache-Control': 'no-cache',
+			'X-Content-Type-Options': 'nosniff',
+		},
+	});
+};
+
+const createStoryStreamResponse = (aiStream: ReadableStream, env: Env, body: ContinueStoryRequest): Response => {
+	const encoder = new TextEncoder();
+	const decoder = new TextDecoder();
+
+	const stream = new ReadableStream<Uint8Array>({
+		async start(controller) {
+			const send = (event: string, data: unknown) => {
+				controller.enqueue(encoder.encode(createSSEEvent(event, data)));
+			};
+
+			const reader = aiStream.getReader();
+
+			let buffer = '';
+			let fullContent = '';
+
+			const processEvent = (rawEvent: string) => {
+				const data = rawEvent
+					.split('\n')
+					.filter((line) => line.startsWith('data:'))
+					.map((line) => line.slice(5).trimStart())
+					.join('\n');
+
+				if (!data || data === '[DONE]') return;
+
+				try {
+					const parsed = JSON.parse(data);
+
+					const content = parsed.response ?? parsed.choices?.[0]?.delta?.content;
+
+					if (typeof content === 'string' && content) {
+						fullContent += content;
+						send('chunk', { content });
+					}
+				} catch {
+					console.warn('Unrecognized story stream event');
+				}
+			};
+
+			try {
+				while (true) {
+					const { done, value } = await reader.read();
+
+					if (done) break;
+
+					buffer += decoder.decode(value, {
+						stream: true,
+					});
+
+					buffer = buffer.replace(/\r\n/g, '\n');
+
+					const events = buffer.split('\n\n');
+					buffer = events.pop() ?? '';
+
+					for (const rawEvent of events) {
+						processEvent(rawEvent);
+					}
+				}
+
+				buffer += decoder.decode();
+
+				if (buffer.trim()) {
+					processEvent(buffer);
+				}
+
+				if (!fullContent.trim()) {
+					throw new Error('AI returned an empty story scene.');
+				}
+
+				const choices = await generateStoryChoices(env, body, fullContent);
+
+				send('choices', { choices });
+				send('done', {});
+			} catch (error) {
+				console.error('Story streaming error:', error);
+
+				send('error', {
+					message: 'Unable to continue story.',
 				});
 			} finally {
 				reader.releaseLock();
@@ -783,6 +1275,137 @@ export default {
 				console.error('Explore continuation error:', error);
 
 				return Response.json({ error: 'Unable to continue reading.' }, { status: 500, headers: corsHeaders });
+			}
+		}
+
+		if (request.method === 'POST' && url.pathname === '/api/stories/start') {
+			try {
+				const body = await request.json<StartStoryRequest>();
+
+				if (
+					typeof body.prompt !== 'string' ||
+					!body.prompt.trim() ||
+					body.prompt.trim().length > 2000 ||
+					(body.language !== 'it' && body.language !== 'en')
+				) {
+					return Response.json({ error: 'Invalid story request.' }, { status: 400, headers: corsHeaders });
+				}
+
+				const story = await generateStoryWithAI(env, body.prompt.trim(), body.language);
+
+				return Response.json(story, {
+					headers: corsHeaders,
+				});
+			} catch (error) {
+				console.error('Story generation error:', error);
+
+				return Response.json({ error: 'Unable to generate story.' }, { status: 500, headers: corsHeaders });
+			}
+		}
+
+		if (request.method === 'POST' && url.pathname === '/api/stories/continue') {
+			try {
+				const body = await request.json<ContinueStoryRequest>();
+
+				if (
+					typeof body.prompt !== 'string' ||
+					!body.prompt.trim() ||
+					body.prompt.length > 2000 ||
+					typeof body.title !== 'string' ||
+					!body.title.trim() ||
+					body.title.length > 300 ||
+					(body.language !== 'it' && body.language !== 'en') ||
+					!Array.isArray(body.scenes) ||
+					body.scenes.length === 0 ||
+					body.scenes.length > 30
+				) {
+					return Response.json({ error: 'Invalid continuation request.' }, { status: 400, headers: corsHeaders });
+				}
+
+				const validScenes = body.scenes.every((scene) => {
+					if (
+						typeof scene.content !== 'string' ||
+						!scene.content.trim() ||
+						scene.content.length > 15000 ||
+						!Array.isArray(scene.choices) ||
+						scene.choices.length !== 5 ||
+						typeof scene.selectedChoiceId !== 'string'
+					) {
+						return false;
+					}
+
+					return (
+						scene.choices.every(
+							(choice) => typeof choice.id === 'string' && typeof choice.text === 'string' && choice.text.trim().length > 0,
+						) && scene.choices.some((choice) => choice.id === scene.selectedChoiceId)
+					);
+				});
+
+				if (!validScenes) {
+					return Response.json({ error: 'Invalid story history.' }, { status: 400, headers: corsHeaders });
+				}
+
+				const continuation = await continueStoryWithAI(env, body);
+
+				return Response.json(continuation, {
+					headers: corsHeaders,
+				});
+			} catch (error) {
+				console.error('Story continuation error:', error);
+
+				return Response.json({ error: 'Unable to continue story.' }, { status: 500, headers: corsHeaders });
+			}
+		}
+
+		if (request.method === 'POST' && url.pathname === '/api/stories/continue/stream') {
+			try {
+				const body = await request.json<ContinueStoryRequest>();
+
+				if (
+					typeof body.prompt !== 'string' ||
+					!body.prompt.trim() ||
+					body.prompt.length > 2000 ||
+					typeof body.title !== 'string' ||
+					!body.title.trim() ||
+					body.title.length > 300 ||
+					(body.language !== 'it' && body.language !== 'en') ||
+					!Array.isArray(body.scenes) ||
+					body.scenes.length === 0 ||
+					body.scenes.length > 30
+				) {
+					return Response.json({ error: 'Invalid continuation request.' }, { status: 400, headers: corsHeaders });
+				}
+
+				const validScenes = body.scenes.every((scene) => {
+					if (
+						typeof scene.content !== 'string' ||
+						!scene.content.trim() ||
+						scene.content.length > 15000 ||
+						!Array.isArray(scene.choices) ||
+						scene.choices.length !== 5 ||
+						typeof scene.selectedChoiceId !== 'string'
+					) {
+						return false;
+					}
+
+					return (
+						scene.choices.every(
+							(choice) => typeof choice.id === 'string' && typeof choice.text === 'string' && choice.text.trim().length > 0,
+						) && scene.choices.some((choice) => choice.id === scene.selectedChoiceId)
+					);
+				});
+
+				if (!validScenes) {
+					return Response.json({ error: 'Invalid story history.' }, { status: 400, headers: corsHeaders });
+				}
+
+				const aiStream = await streamStoryNarrative(env, body);
+
+				return createStoryStreamResponse(aiStream, env, body);
+			} catch (error) {
+				console.error('Story stream initialization error:', error);
+
+				return Response.json({ error: 'Unable to start story streaming.' }, { status: 500, headers: corsHeaders });
 			}
 		}
 

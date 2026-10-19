@@ -4,7 +4,8 @@ import LanguageView from "@/views/LanguageView.vue";
 import HomeView from "@/views/HomeView.vue";
 import ExploreView from "@/views/ExploreView.vue";
 import StoriesView from "@/views/StoriesView.vue";
-import ReadingView from '@/views/ReadingView.vue'
+import ReadingView from "@/views/ReadingView.vue";
+
 
 const LANGUAGE_STORAGE_KEY = "aiterna-language";
 
@@ -36,6 +37,12 @@ const router = createRouter({
       path: "/reading",
       name: "reading",
       component: ReadingView,
+    },
+
+    {
+      path: "/stories/read",
+      name: "story-reading",
+      component: () => import("@/views/StoryReadingView.vue"),
     },
   ],
 });
